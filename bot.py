@@ -1,8 +1,7 @@
-import random
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from pymongo import MongoClient
-import config  # Import settings from config.py
+import config
 import numpy as np
 
 # Initialize MongoDB client
@@ -37,15 +36,14 @@ class AnimeGuessingGame:
             user_info = self.get_or_create_user(user_id)
             reward = user_info["level"] * config.COINS_PER_GUESS
             user_info["coins"] += reward
-            user_info["level"] += 1  # Increase level on correct guess
+            user_info["level"] += 1
             user_info["guess_count"] += 1
             self.save_user_data(user_id, user_info)
 
             if user_info["guess_count"] >= config.MESSAGE_THRESHOLD:
-                user_info["guess_count"] = 0  # Reset count automatically
+                user_info["guess_count"] = 0
                 self.save_user_data(user_id, user_info)
                 return True, reward, "threshold_reached"
-
             return True, reward, "continue"
         else:
             return False, self.get_hint()
@@ -61,7 +59,6 @@ class AnimeGuessingGame:
         user_collection.update_one({"user_id": user_id}, {"$set": user_data})
 
     def assign_rarity(self):
-        """Assign a rarity level based on predefined weights."""
         rarity = np.random.choice(list(config.RARITY_LEVELS.keys()), p=[w / 100 for w in config.RARITY_WEIGHTS])
         return rarity, config.RARITY_LEVELS[rarity]
 
@@ -90,10 +87,9 @@ class AnimeGuessingGame:
 # Initialize the game
 game = AnimeGuessingGame()
 
-
-# Handlers for Telegram Bot Commands
+# Define Bot Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🎉 Welcome to Philo Waifu! 🎉 Start guessing the character name from the image. Type /help for a list of commands.")
+    await update.message.reply_text("🎉 Welcome to Philo Waifu! 🎉 Start guessing the character name. Type /help for commands.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (
@@ -101,7 +97,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/start - Start the game and get a welcome message\n"
         "/profile - View your profile (level and coins)\n"
         "/leaderboard - View the top 10 players\n"
-        "/upload <character_name> - (Owner/Sudo only) Upload a new character without an image\n"
+        "/upload <character_name> - (Owner/Sudo only) Upload a new character\n"
         "/addsudo <user_id> - (Owner only) Grant sudo privileges to a user\n"
         "/help - Display this help message\n"
     )
@@ -125,6 +121,15 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     leaderboard_text = game.get_leaderboard()
     await update.message.reply_text(leaderboard_text)
 
+async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.message.from_user.id
+    if len(context.args) < 1:
+        await update.message.reply_text("Usage: /upload <character_name>")
+        return
+    character_name = " ".join(context.args)
+    response = game.upload_character(character_name, user_id)
+    await update.message.reply_text(response)
+
 async def add_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current_user_id = update.message.from_user.id
     try:
@@ -144,22 +149,15 @@ async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"🎉 Correct! 🎉 You've earned {response} coins. Total coins: {user_info['coins']} 💰. Level: {user_info['level']} 🌟")
 
         if status == "threshold_reached":
-            await update.message.reply_text("🔄 You've reached the threshold! Here’s a new character to keep the game going.")
+            await update.message.reply_text("🔄 You've reached the threshold! Here’s a new character.")
         
-        # Send the next character automatically with rarity caption
         game.start_game()
         rarity_emoji = game.selected_character.get("emoji", "")
         await update.message.reply_text(f"◉ {rarity_emoji} **A new character has appeared! Start guessing!** {rarity_emoji} ◉")
     else:
         await update.message.reply_text(f"❌ Incorrect! Hint: {response}")
 
-async def send_character_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    game.start_game()
-    rarity_emoji = game.selected_character.get("emoji", "")
-    await update.message.reply_text(f"◉ {rarity_emoji} **A new character has appeared! Start guessing!** {rarity_emoji} ◉")
-
-
-# Setting up the bot and command handlers with infinite polling
+# Main Function to Initialize Handlers and Run Bot
 def main():
     application = Application.builder().token(config.API_TOKEN).build()
 
@@ -167,16 +165,11 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("profile", profile))
     application.add_handler(CommandHandler("leaderboard", leaderboard))
-    application.add_handler(CommandHandler("addsudo", add_sudo, filters.User(config.BOT_OWNER_ID)))
     application.add_handler(CommandHandler("upload", upload, filters.User(config.BOT_OWNER_ID) | filters.UserFilter(lambda user_id: user_id in game.sudo_users)))
-
-    # Allows users to guess without using /guess by listening for text messages
+    application.add_handler(CommandHandler("addsudo", add_sudo, filters.User(config.BOT_OWNER_ID)))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_guess))
 
-    # Infinite polling to keep the bot running
-    application.run_polling(allowed_updates=Update.ALL)
-
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
-                
