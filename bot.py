@@ -1,240 +1,191 @@
-import time
-import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from pymongo import MongoClient
-import config
-import numpy as np
+import os
+import telebot
+import random
+from pymongo import MongoClient, errors
+from datetime import datetime, timedelta
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Set up logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# Load environment variables for sensitive information
+API_TOKEN = os.getenv("API_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
+BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID"))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
-# MongoDB connection with error handling
-mongo_connected = False
+# MongoDB Connection
 try:
-    client = MongoClient(config.MONGO_URI)
-    db = client["AnimeGameDB"]
-    characters_collection = db["characters"]
-    user_collection = db["users"]
-    mongo_connected = True
-    logger.info("MongoDB connected successfully.")
-except Exception as e:
-    logger.error("Failed to connect to MongoDB", exc_info=True)
+    client = MongoClient(MONGO_URI)
+    db = client['philo_grabber']  # Database name
+    users_collection = db['users']  # Collection for user data
+    characters_collection = db['characters']  # Collection for character data
+    groups_collection = db['groups']  # Collection for group stats
+    print("✅ Connected to MongoDB")
+except errors.ServerSelectionTimeoutError as err:
+    print(f"Error: Could not connect to MongoDB: {err}")
+    exit()
 
+SUDO_USERS = [BOT_OWNER_ID, 6180999156]
 
-class AnimeGuessingGame:
-    def __init__(self):
-        self.selected_character = None
-        self.hint_index = 0
-        self.sudo_users = set()
+bot = telebot.TeleBot(API_TOKEN)
 
-    def start_game(self):
-        self.selected_character = self.get_random_character()
-        self.hint_index = 0
+BONUS_COINS = 50000
+BONUS_INTERVAL = timedelta(days=1)
+COINS_PER_GUESS = 50
+STREAK_BONUS_COINS = 1000
 
-    def get_random_character(self):
-        try:
-            character = characters_collection.aggregate([{"$sample": {"size": 1}}]).next()
-            return character
-        except Exception as e:
-            logger.error("Error fetching character from MongoDB", exc_info=True)
-            return None
+# Updated Rarity Levels with New Categories and Emojis
+RARITY_LEVELS = {
+    'Bronze': '🥉',
+    'Silver': '🥈',
+    'Gold': '🥇',
+    'Platinum': '💿',
+    'Diamond': '💎'
+}
+RARITY_WEIGHTS = [60, 25, 10, 4, 1]  # Adjusted weights for new rarities
+MESSAGE_THRESHOLD = 5  # Default number of messages before sending a new character
+TOP_LEADERBOARD_LIMIT = 10
 
-    def get_hint(self):
-        name = self.selected_character["name"]
-        hint = name[:self.hint_index + 1] + "_" * (len(name) - self.hint_index - 1)
-        self.hint_index += 1
-        return hint
+# Level-Up System Configuration
+XP_PER_CORRECT_GUESS = 100
+XP_PER_BONUS_CLAIM = 50
+LEVEL_UP_XP_BASE = 500
+LEVEL_UP_XP_INCREMENT = 150
 
-    def guess_character(self, user_id, guess):
-        character_name = self.selected_character["name"].lower()
-        if guess.lower() == character_name:
-            user_info = self.get_or_create_user(user_id)
-            reward = user_info["level"] * config.COINS_PER_GUESS
-            user_info["coins"] += reward
-            user_info["level"] += 1
-            user_info["guess_count"] += 1
-            self.save_user_data(user_id, user_info)
+def is_sudo(user_id):
+    return user_id in SUDO_USERS
 
-            if user_info["guess_count"] >= config.MESSAGE_THRESHOLD:
-                user_info["guess_count"] = 0
-                self.save_user_data(user_id, user_info)
-                return True, reward, "threshold_reached"
-            return True, reward, "continue"
-        else:
-            return False, self.get_hint()
+# Helper function for calculating level and XP threshold
+def calculate_level_and_xp(user_xp):
+    level = 1
+    xp_threshold = LEVEL_UP_XP_BASE
+    while user_xp >= xp_threshold:
+        user_xp -= xp_threshold
+        level += 1
+        xp_threshold += LEVEL_UP_XP_INCREMENT
+    return level, xp_threshold - user_xp
 
-    def get_or_create_user(self, user_id):
-        try:
-            user = user_collection.find_one({"user_id": user_id})
-            if not user:
-                user = {"user_id": user_id, "coins": 0, "level": 1, "guess_count": 0}
-                user_collection.insert_one(user)
-            return user
-        except Exception as e:
-            logger.error("Error retrieving or creating user", exc_info=True)
-            return {"user_id": user_id, "coins": 0, "level": 1, "guess_count": 0}
+# Function to assign rarity based on defined weights
+def assign_rarity():
+    return random.choices(list(RARITY_LEVELS.keys()), weights=RARITY_WEIGHTS, k=1)[0]
 
-    def save_user_data(self, user_id, user_data):
-        try:
-            user_collection.update_one({"user_id": user_id}, {"$set": user_data})
-        except Exception as e:
-            logger.error("Error saving user data", exc_info=True)
+# Global variables to track the current character and message count
+current_character = None
+global_message_count = 0
 
-    def assign_rarity(self):
-        try:
-            rarity = np.random.choice(list(config.RARITY_LEVELS.keys()), p=[w / 100 for w in config.RARITY_WEIGHTS])
-            return rarity, config.RARITY_LEVELS[rarity]
-        except Exception as e:
-            logger.error("Error assigning character rarity", exc_info=True)
-            return "Common", "⭐"
+def get_user_data(user_id):
+    user = users_collection.find_one({'user_id': user_id})
+    if user is None:
+        new_user = {
+            'user_id': user_id,
+            'coins': 0,
+            'correct_guesses': 0,
+            'xp': 0,
+            'last_bonus': None,
+            'streak': 0,
+            'profile': None
+        }
+        users_collection.insert_one(new_user)
+        return new_user
+    return user
 
-    def upload_character(self, character_name, user_id):
-        if user_id == config.BOT_OWNER_ID or user_id in self.sudo_users:
-            rarity, rarity_emoji = self.assign_rarity()
-            try:
-                characters_collection.insert_one({"name": character_name, "rarity": rarity, "emoji": rarity_emoji})
-                return f"✅ Character '{character_name}' added successfully with rarity {rarity_emoji} ({rarity})."
-            except Exception as e:
-                logger.error("Error uploading character to MongoDB", exc_info=True)
-                return "❌ Failed to add character to the database."
-        else:
-            return "❌ User does not have permission to upload characters."
+def update_user_data(user_id, update_data):
+    users_collection.update_one({'user_id': user_id}, {'$set': update_data})
 
-    def get_leaderboard(self):
-        try:
-            top_users = user_collection.find().sort("coins", -1).limit(config.TOP_LEADERBOARD_LIMIT)
-            leaderboard_text = "◉ 🏆 Top 10 Users 🏆 ◉\n"
-            leaderboard_text += "\n".join([f"{user['user_id']}: {user['coins']} coins 💰" for user in top_users])
-            return leaderboard_text
-        except Exception as e:
-            logger.error("Error fetching leaderboard data", exc_info=True)
-            return "❌ Failed to retrieve leaderboard."
+# Helper function to update character IDs sequentially
+def update_character_ids():
+    characters = list(characters_collection.find().sort("id"))
+    for index, character in enumerate(characters):
+        new_id = index + 1
+        if character["id"] != new_id:
+            characters_collection.update_one({"_id": character["_id"]}, {"$set": {"id": new_id}})
 
-    def add_sudo_user(self, new_sudo_id, current_user_id):
-        if current_user_id == config.BOT_OWNER_ID:
-            self.sudo_users.add(new_sudo_id)
-            return f"👑 User {new_sudo_id} has been granted sudo privileges."
-        else:
-            return "❌ Only the owner can add sudo users."
+# Function to handle XP and potential level-up
+def handle_level_up(user_id, xp_gained):
+    user = get_user_data(user_id)
+    new_xp = user['xp'] + xp_gained
+    level_before, _ = calculate_level_and_xp(user['xp'])
+    level_after, xp_to_next_level = calculate_level_and_xp(new_xp)
 
+    update_user_data(user_id, {'xp': new_xp})
 
-# Initialize the game
-game = AnimeGuessingGame()
+    if level_after > level_before:
+        return level_after, xp_to_next_level
+    else:
+        return None, xp_to_next_level
 
-# Define a helper function to create a custom filter for owner or sudo users
-def is_owner_or_sudo(user_id):
-    return user_id == config.BOT_OWNER_ID or user_id in game.sudo_users
-
-# Define Bot Command Handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("🎉 Welcome to Philo Waifu! 🎉 Start guessing the character name. Type /help for commands.")
-
-async def hello(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler for /hello command to check bot's active status and MongoDB connection."""
-    start_time = time.time()
-    mongo_status = "connected" if mongo_connected else "not connected"
-    ping = round((time.time() - start_time) * 1000)  # Ping in milliseconds
-    await update.message.reply_text(f"👋 Bot is active!\nMongoDB is {mongo_status}.\nPing: {ping} ms.")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    help_text = (
-        "⌲ 📜 **Available Commands** 📜 ⌲\n"
-        "/start - Start the game\n"
-        "/hello - Check bot status and MongoDB connection\n"
-        "/profile - View your profile\n"
-        "/leaderboard - View the top players\n"
-        "/upload <character_name> - Upload a new character\n"
-        "/addsudo <user_id> - Grant sudo privileges\n"
-        "/help - Display help message\n"
-    )
-    await update.message.reply_text(help_text)
-
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.message.from_user.id
-    try:
-        user = game.get_or_create_user(user_id)
-        profile_info = (
-            f"◉ 👤 **Profile** 👤 ◉\n"
-            f"⌲ Level: {user['level']} 🌟\n"
-            f"⌲ Coins: {user['coins']} 💰\n"
-            f"⌲ Guesses Left until Reset: {config.MESSAGE_THRESHOLD - user['guess_count']} 🔄"
+# Function to shuffle and send a random character
+def send_character(chat_id):
+    global current_character
+    characters = list(characters_collection.find())
+    if characters:
+        current_character = random.choice(characters)  # Shuffle and pick a random character
+        rarity = RARITY_LEVELS[current_character['rarity']]
+        caption = (
+            f"🎨 Guess the Anime Character!\n\n"
+            f"💬 Name: ???\n"
+            f"✨ Rarity: {rarity} {current_character['rarity']}\n"
         )
-        await update.message.reply_text(profile_info)
-    except Exception as e:
-        logger.error("Error fetching profile", exc_info=True)
-        await update.message.reply_text("❌ Failed to retrieve profile.")
-
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    leaderboard_text = game.get_leaderboard()
-    await update.message.reply_text(leaderboard_text)
-
-async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.message.from_user.id
-    if is_owner_or_sudo(user_id):
-        if len(context.args) < 1:
-            await update.message.reply_text("Usage: /upload <character_name>")
-            return
-        character_name = " ".join(context.args)
-        response = game.upload_character(character_name, user_id)
-        await update.message.reply_text(response)
-    else:
-        await update.message.reply_text("❌ You do not have permission to use this command.")
-
-async def add_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    current_user_id = update.message.from_user.id
-    if current_user_id == config.BOT_OWNER_ID:
         try:
-            new_sudo_id = int(context.args[0])
-            response = game.add_sudo_user(new_sudo_id, current_user_id)
-            await update.message.reply_text(response)
-        except (IndexError, ValueError) as e:
-            logger.error("Error processing addsudo command", exc_info=True)
-            await update.message.reply_text("Usage: /addsudo <user_id>")
-    else:
-        await update.message.reply_text("❌ Only the bot owner can add sudo users.")
-
-async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.message.from_user.id
-    guess_text = update.message.text
-    if game.selected_character is None:
-        await update.message.reply_text("❌ No character is currently available. Please wait for the next round.")
-        return
-
-    correct, response, status = game.guess_character(user_id, guess_text)
-    if correct:
-        user_info = game.get_or_create_user(user_id)
-        await update.message.reply_text(f"🎉 Correct! 🎉 You've earned {response} coins. Total coins: {user_info['coins']} 💰. Level: {user_info['level']} 🌟")
-
-        if status == "threshold_reached":
-            await update.message.reply_text("🔄 Threshold reached! Here's a new character.")
-        game.start_game()
-        rarity_emoji = game.selected_character.get("emoji", "")
-        await update.message.reply_text(f"◉ {rarity_emoji} **A new character has appeared! Start guessing!** {rarity_emoji} ◉")
-    else:
-        await update.message.reply_text(f"❌ Incorrect! Hint: {response}")
-
-def main():
-    application = Application.builder().token(config.API_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("hello", hello))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("profile", profile))
-    application.add_handler(CommandHandler("leaderboard", leaderboard))
-    application.add_handler(CommandHandler("upload", upload))
-    application.add_handler(CommandHandler("addsudo", add_sudo))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_guess))
-
-    # Infinite polling with error handling
-    while True:
-        try:
-            application.run_polling()
+            bot.send_photo(chat_id, current_character['image_url'], caption=caption)
         except Exception as e:
-            logger.error("Error in polling. Restarting...", exc_info=True)
-            time.sleep(5)  # Pause before retrying
+            print(f"Error sending character image: {e}")
+            bot.send_message(chat_id, "❌ Unable to send character image.")
+    else:
+        bot.send_message(chat_id, "⚠️ No characters available to display.")
 
-if __name__ == "__main__":
-    main()
+# Message handler for character guessing and message counting
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message):
+    global global_message_count
+    global current_character
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    user_guess = message.text.strip().lower() if message.text else ""
+
+    # Increment message count if in a group or supergroup
+    if message.chat.type in ['group', 'supergroup']:
+        global_message_count += 1
+
+    # Send a shuffled character if message threshold is met
+    if global_message_count >= MESSAGE_THRESHOLD:
+        send_character(chat_id)
+        global_message_count = 0
+
+    # Check for correct guess if there's a current character to guess
+    if current_character and user_guess:
+        character_name = current_character['character_name'].strip().lower()
+
+        if user_guess in character_name:
+            # Correct guess detected
+            user = get_user_data(user_id)
+            new_coins = user['coins'] + COINS_PER_GUESS
+            user['correct_guesses'] += 1
+            user['streak'] += 1
+            streak_bonus = STREAK_BONUS_COINS * user['streak']
+
+            # Update user data with new coins, streak, and correct guesses
+            update_user_data(user_id, {
+                'coins': new_coins + streak_bonus,
+                'correct_guesses': user['correct_guesses'],
+                'streak': user['streak']
+            })
+
+            # Handle XP and potential level-up
+            level_up, xp_to_next_level = handle_level_up(user_id, XP_PER_CORRECT_GUESS)
+
+            # Send congratulatory message
+            response = (f"🎉 Congratulations! You guessed correctly and earned {COINS_PER_GUESS} coins!\n"
+                        f"🔥 Streak Bonus: {streak_bonus} coins for a {user['streak']}-guess streak!\n"
+                        f"🌟 You earned {XP_PER_CORRECT_GUESS} XP.")
+            if level_up:
+                response += f"\n🏆 Congratulations! You've leveled up to Level {level_up}!"
+            else:
+                response += f"\n📈 XP to next level: {xp_to_next_level}"
+
+            bot.reply_to(message, response)
+
+            # Send a new character after a correct guess
+            send_character(chat_id)
+            current_character = None  # Reset current character after a correct guess
+
+# Start polling
+bot.infinity_polling(timeout=60, long_polling_timeout=60)
