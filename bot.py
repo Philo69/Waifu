@@ -51,23 +51,30 @@ current_character = None
 global_message_count = 0
 
 def get_user_data(user_id):
-    user = users_collection.find_one({'user_id': user_id})
-    if user is None:
-        new_user = {
-            'user_id': user_id,
-            'coins': 0,
-            'correct_guesses': 0,
-            'xp': 0,
-            'last_bonus': None,
-            'streak': 0,
-            'profile': None
-        }
-        users_collection.insert_one(new_user)
-        return new_user
-    return user
+    try:
+        user = users_collection.find_one({'user_id': user_id})
+        if user is None:
+            new_user = {
+                'user_id': user_id,
+                'coins': 0,
+                'correct_guesses': 0,
+                'xp': 0,
+                'last_bonus': None,
+                'streak': 0,
+                'profile': None
+            }
+            users_collection.insert_one(new_user)
+            return new_user
+        return user
+    except Exception as e:
+        print(f"Error fetching user data: {e}")
+        return None
 
 def update_user_data(user_id, update_data):
-    users_collection.update_one({'user_id': user_id}, {'$set': update_data})
+    try:
+        users_collection.update_one({'user_id': user_id}, {'$set': update_data})
+    except Exception as e:
+        print(f"Error updating user data: {e}")
 
 def calculate_level_and_xp(user_xp):
     level = 1
@@ -77,10 +84,13 @@ def calculate_level_and_xp(user_xp):
         user_xp -= xp_threshold
         level += 1
         xp_threshold += increment
-    return level, xp_threshold - user_xp
+    return level, xp_to_next_level - user_xp
 
 def handle_level_up(user_id, xp_gained):
     user = get_user_data(user_id)
+    if user is None:
+        return None, None
+
     new_xp = user['xp'] + xp_gained
     level_before, _ = calculate_level_and_xp(user['xp'])
     level_after, xp_to_next_level = calculate_level_and_xp(new_xp)
@@ -118,6 +128,10 @@ def send_character(chat_id):
 def send_welcome(message):
     user_id = message.from_user.id
     user = get_user_data(user_id)
+    if user is None:
+        bot.reply_to(message, "Error initializing user data.")
+        return
+
     if not user['profile']:
         profile_name = message.from_user.full_name
         update_user_data(user_id, {'profile': profile_name})
@@ -143,6 +157,7 @@ def show_help(message):
 /bonus - Claim your daily bonus coins and XP.
 /profile - View your profile, including your level, XP, and coins.
 /leaderboard - Show the top 10 users with their levels and coins.
+/stats - View bot statistics (Owner only).
 
 🔧 <b>Sudo Commands:</b> (For bot owners and sudo users)
 /upload <img_url> <character_name> - Add a new character with an image URL and character name.
@@ -155,8 +170,11 @@ def show_help(message):
 def show_profile(message):
     user_id = message.from_user.id
     user = get_user_data(user_id)
-    level, xp_to_next_level = calculate_level_and_xp(user['xp'])
+    if user is None:
+        bot.reply_to(message, "Error fetching profile data.")
+        return
 
+    level, xp_to_next_level = calculate_level_and_xp(user['xp'])
     profile_message = (
         f"<b>🌸 Profile of {user['profile'] or 'User'}</b>\n\n"
         f"💠 Level: {level}\n"
@@ -170,8 +188,11 @@ def show_profile(message):
 def claim_bonus(message):
     user_id = message.from_user.id
     user = get_user_data(user_id)
-    current_time = datetime.now()
+    if user is None:
+        bot.reply_to(message, "Error fetching user data.")
+        return
 
+    current_time = datetime.now()
     if user['last_bonus']:
         time_since_last_bonus = current_time - user['last_bonus']
         if time_since_last_bonus < BONUS_INTERVAL:
@@ -191,7 +212,7 @@ def claim_bonus(message):
         'streak': user['streak']
     })
 
-    level_up, xp_to_next_level = handle_level_up(user_id, XP_PER_CORRECT_GUESS)
+    level_up, xp_to_next_level = handle_level_up(user_id, XP_PER_BONUS_CLAIM)
 
     response = (f"🎁 You have claimed your daily bonus of {BONUS_COINS} coins! 🎉\n"
                 f"🔥 Streak Bonus: {streak_bonus} coins for a {user['streak']}-day streak!\n"
@@ -205,64 +226,39 @@ def claim_bonus(message):
 
 @bot.message_handler(commands=['leaderboard'])
 def show_leaderboard(message):
-    top_users = users_collection.find().sort('coins', -1).limit(TOP_LEADERBOARD_LIMIT)
-    leaderboard_message = "<b>🏆 Leaderboard</b>\n\n"
-    for i, user in enumerate(top_users, start=1):
-        level, _ = calculate_level_and_xp(user['xp'])
-        leaderboard_message += (
-            f"{i}. {user['profile'] or 'User'}\n"
-            f"   💰 Coins: {user['coins']} | 💠 Level: {level}\n"
+    try:
+        top_users = users_collection.find().sort('coins', -1).limit(TOP_LEADERBOARD_LIMIT)
+        leaderboard_message = "<b>🏆 Leaderboard</b>\n\n"
+        for i, user in enumerate(top_users, start=1):
+            level, _ = calculate_level_and_xp(user['xp'])
+            leaderboard_message += (
+                f"{i}. {user['profile'] or 'User'}\n"
+                f"   💰 Coins: {user['coins']} | 💠 Level: {level}\n"
+            )
+        bot.send_message(message.chat.id, leaderboard_message, parse_mode='HTML')
+    except Exception as e:
+        bot.reply_to(message, "Error fetching leaderboard.")
+
+@bot.message_handler(commands=['stats'])
+def show_stats(message):
+    if message.from_user.id != BOT_OWNER_ID:
+        bot.reply_to(message, "🚫 You don't have permission to use this command.")
+        return
+
+    try:
+        total_users = users_collection.count_documents({})
+        total_characters = characters_collection.count_documents({})
+        total_groups = groups_collection.count_documents({})
+
+        stats_message = (
+            f"<b>📊 Bot Statistics:</b>\n\n"
+            f"👤 Total Users: {total_users}\n"
+            f"🎎 Total Characters: {total_characters}\n"
+            f"💬 Total Groups: {total_groups}\n"
         )
-    bot.send_message(message.chat.id, leaderboard_message, parse_mode='HTML')
-
-@bot.message_handler(commands=['upload'])
-def upload_character(message):
-    if message.from_user.id not in SUDO_USERS:
-        bot.reply_to(message, "🚫 You don't have permission to use this command.")
-        return
-
-    try:
-        command_args = message.text.split(maxsplit=2)
-        if len(command_args) < 3:
-            bot.reply_to(message, "⚠️ Usage: /upload <img_url> <character_name>")
-            return
-
-        img_url = command_args[1]
-        character_name = command_args[2]
-        rarity = assign_rarity()
-
-        new_character = {
-            'image_url': img_url,
-            'character_name': character_name,
-            'rarity': rarity
-        }
-        characters_collection.insert_one(new_character)
-
-        bot.reply_to(message, f"✅ Character '{character_name}' with rarity '{RARITY_DICT[rarity]} {rarity}' uploaded successfully!")
+        bot.send_message(message.chat.id, stats_message, parse_mode='HTML')
     except Exception as e:
-        bot.reply_to(message, "⚠️ An error occurred while uploading the character.")
-
-@bot.message_handler(commands=['delete'])
-def delete_character(message):
-    if message.from_user.id not in SUDO_USERS:
-        bot.reply_to(message, "🚫 You don't have permission to use this command.")
-        return
-
-    try:
-        command_args = message.text.split(maxsplit=1)
-        if len(command_args) < 2:
-            bot.reply_to(message, "⚠️ Usage: /delete <id>")
-            return
-
-        character_id = int(command_args[1])
-        result = characters_collection.delete_one({'id': character_id})
-
-        if result.deleted_count > 0:
-            bot.reply_to(message, f"✅ Character with ID {character_id} has been deleted successfully.")
-        else:
-            bot.reply_to(message, f"⚠️ Character with ID {character_id} was not found.")
-    except Exception as e:
-        bot.reply_to(message, "⚠️ An error occurred while deleting the character.")
+        bot.reply_to(message, "Error fetching stats.")
 
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
@@ -283,6 +279,10 @@ def handle_all_messages(message):
         character_name = current_character['character_name'].strip().lower()
         if user_guess in character_name:
             user = get_user_data(user_id)
+            if user is None:
+                bot.reply_to(message, "Error fetching user data.")
+                return
+
             new_coins = user['coins'] + COINS_PER_GUESS
             user['correct_guesses'] += 1
             user['streak'] += 1
