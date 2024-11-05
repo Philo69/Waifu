@@ -4,130 +4,29 @@ import telebot
 import random
 from pymongo import MongoClient, errors
 from datetime import datetime, timedelta
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Access environment variables
+# Critical environment variables
 API_TOKEN = os.getenv("API_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID"))
 CHARACTER_CHANNEL_ID = int(os.getenv("CHARACTER_CHANNEL_ID"))
 
-# Game Settings
-BONUS_COINS = int(os.getenv("BONUS_COINS"))
-STREAK_BONUS_COINS = int(os.getenv("STREAK_BONUS_COINS"))
-BONUS_INTERVAL = timedelta(days=int(os.getenv("BONUS_INTERVAL_DAYS")))
+# Game Settings (constants defined directly in the script)
+BONUS_COINS = 50000               # Daily bonus coins for /bonus command
+STREAK_BONUS_COINS = 1000         # Additional coins for maintaining a streak
+BONUS_INTERVAL = timedelta(days=1) # Time interval for claiming daily bonus
 
-COINS_PER_GUESS = int(os.getenv("COINS_PER_GUESS"))
-MESSAGE_THRESHOLD = int(os.getenv("MESSAGE_THRESHOLD"))
-TOP_LEADERBOARD_LIMIT = int(os.getenv("TOP_LEADERBOARD_LIMIT"))
-
-# Character Rarity Settings
-RARITY_LEVELS = os.getenv("RARITY_LEVELS").split(',')
-RARITY_EMOJIS = os.getenv("RARITY_EMOJIS").split(',')
-RARITY_WEIGHTS = list(map(int, os.getenv("RARITY_WEIGHTS").split(',')))
-RARITY_DICT = dict(zip(RARITY_LEVELS, RARITY_EMOJIS))
-
-# MongoDB Connection
-try:
-    client = MongoClient(MONGO_URI)
-    db = client['philo_grabber']  # Database name
-    users_collection = db['users']  # Collection for user data
-    characters_collection = db['characters']  # Collection for character data
-    groups_collection = db['groups']  # Collection for group stats
-    print("✅ Connected to MongoDB")
-except errors.ServerSelectionTimeoutError as err:
-    print(f"Error: Could not connect to MongoDB: {err}")
-    exit()
-
-SUDO_USERS = [BOT_OWNER_ID]  # List of sudo users, starting with the bot owner
-
-bot = telebot.TeleBot(API_TOKEN)
-
-# Global variables to track the current character and message count
-current_character = None
-global_message_count = 0
-
-def get_user_data(user_id):
-    try:
-        user = users_collection.find_one({'user_id': user_id})
-        if user is None:
-            new_user = {
-                'user_id': user_id,
-                'coins': 0,
-                'correct_guesses': 0,
-                'xp': 0,
-                'last_bonus': None,
-                'streak': 0,
-                'profile': None
-            }
-            users_collection.insert_one(new_user)
-            return new_user
-        return user
-    except Exception as e:
-        print(f"Error fetching user data: {e}")
-        return None
-
-def update_user_data(user_id, update_data):
-    try:
-        users_collection.update_one({'user_id': user_id}, {'$set': update_data})
-    except Exception as e:
-        print(f"Error updating user data: {e}")
-
-def calculate_level_and_xp(user_xp):
-    level = 1
-    xp_threshold = 500
-    increment = 150
-    while user_xp >= xp_threshold:
-        user_xp -= xp_threshold
-        level += 1
-        xp_threshold += increment
-    return level, xp_to_next_level - user_xp
-
-def handle_level_up(user_id, xp_gained):
-    user = get_user_data(user_id)
-    if user is None:
-        return None, None
-
-    new_xp = user['xp'] + xp_gained
-    level_before, _ = calculate_level_and_xp(user['xp'])
-    level_after, xp_to_next_level = calculate_level_and_xp(new_xp)
-
-    update_user_data(user_id, {'xp': new_xp})
-
-    if level_after > level_before:
-        return level_after, xp_to_next_level  # Level-up occurred
-from dotenv import load_dotenv
-import os
-import telebot
-import random
-from pymongo import MongoClient, errors
-from datetime import datetime, timedelta
-
-# Load environment variables from .env file
-load_dotenv()
-
-# Access environment variables
-API_TOKEN = os.getenv("API_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID"))
-CHARACTER_CHANNEL_ID = int(os.getenv("CHARACTER_CHANNEL_ID"))
-
-# Game Settings
-BONUS_COINS = int(os.getenv("BONUS_COINS"))
-STREAK_BONUS_COINS = int(os.getenv("STREAK_BONUS_COINS"))
-BONUS_INTERVAL = timedelta(days=int(os.getenv("BONUS_INTERVAL_DAYS")))
-
-COINS_PER_GUESS = int(os.getenv("COINS_PER_GUESS"))
-MESSAGE_THRESHOLD = int(os.getenv("MESSAGE_THRESHOLD"))
-TOP_LEADERBOARD_LIMIT = int(os.getenv("TOP_LEADERBOARD_LIMIT"))
+COINS_PER_GUESS = 50              # Coins awarded for a correct guess
+MESSAGE_THRESHOLD = 5             # Messages needed in group to trigger character appearance
+TOP_LEADERBOARD_LIMIT = 10        # Limit for the top leaderboard display
 
 # Character Rarity Settings
-RARITY_LEVELS = os.getenv("RARITY_LEVELS").split(',')
-RARITY_EMOJIS = os.getenv("RARITY_EMOJIS").split(',')
-RARITY_WEIGHTS = list(map(int, os.getenv("RARITY_WEIGHTS").split(',')))
+RARITY_LEVELS = ['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond']
+RARITY_EMOJIS = ['🥉', '🥈', '🥇', '🏆', '💎']
+RARITY_WEIGHTS = [40, 30, 15, 10, 5]
 RARITY_DICT = dict(zip(RARITY_LEVELS, RARITY_EMOJIS))
 
 # MongoDB Connection
@@ -239,10 +138,12 @@ def send_welcome(message):
     welcome_message = """
 <b>🌸 Welcome to Philo Waifu 🌸</b>
 
-🎉 Dive into the world of anime characters! You can guess characters, earn coins, gain XP, and increase your level.
-Use commands to explore and start collecting unique characters.
+🎉 Dive into the exciting world of anime characters! Here's what you can do:
+- 🏆 Guess anime characters and earn coins, XP, and increase your streak!
+- 💰 Earn daily bonuses, level up, and climb the leaderboard.
+- 🤔 Simply type your guess - if any word matches a character's name, you’ll score!
 
-✨ Let's get started! ✨
+Use /help to see all commands and get started on your adventure. Enjoy!
 """
     bot.send_message(message.chat.id, welcome_message, parse_mode='HTML')
 
