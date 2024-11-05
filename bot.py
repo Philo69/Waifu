@@ -4,6 +4,7 @@ import telebot
 import random
 from pymongo import MongoClient, errors
 from datetime import datetime, timedelta
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # Load environment variables from .env file
 load_dotenv()
@@ -68,7 +69,6 @@ def get_user_data(user_id):
 def update_user_data(user_id, update_data):
     users_collection.update_one({'user_id': user_id}, {'$set': update_data})
 
-# Helper function to calculate level and XP threshold
 def calculate_level_and_xp(user_xp):
     level = 1
     xp_threshold = 500
@@ -125,10 +125,10 @@ def send_welcome(message):
     welcome_message = """
 <b>🌸 Welcome to Philo Waifu 🌸</b>
 
-🎉 Dive into the world of anime characters!
-Use commands to start collecting and guessing.
+🎉 Dive into the world of anime characters! You can guess characters, earn coins, gain XP, and increase your level.
+Use commands to explore and start collecting unique characters.
 
-✨ Let's get started, good luck! ✨
+✨ Let's get started! ✨
 """
     bot.send_message(message.chat.id, welcome_message, parse_mode='HTML')
 
@@ -151,6 +151,119 @@ def show_help(message):
 """
     bot.send_message(message.chat.id, help_message, parse_mode='HTML')
 
+@bot.message_handler(commands=['profile'])
+def show_profile(message):
+    user_id = message.from_user.id
+    user = get_user_data(user_id)
+    level, xp_to_next_level = calculate_level_and_xp(user['xp'])
+
+    profile_message = (
+        f"<b>🌸 Profile of {user['profile'] or 'User'}</b>\n\n"
+        f"💠 Level: {level}\n"
+        f"🌟 XP: {user['xp']} (Next level in {xp_to_next_level} XP)\n"
+        f"💰 Coins: {user['coins']}\n"
+        f"🔥 Streak: {user['streak']} days\n"
+    )
+    bot.send_message(message.chat.id, profile_message, parse_mode='HTML')
+
+@bot.message_handler(commands=['bonus'])
+def claim_bonus(message):
+    user_id = message.from_user.id
+    user = get_user_data(user_id)
+    current_time = datetime.now()
+
+    if user['last_bonus']:
+        time_since_last_bonus = current_time - user['last_bonus']
+        if time_since_last_bonus < BONUS_INTERVAL:
+            time_remaining = BONUS_INTERVAL - time_since_last_bonus
+            hours, remainder = divmod(time_remaining.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            bot.reply_to(message, f"⏰ You've already claimed your bonus today! Come back in {hours} hours and {minutes} minutes.")
+            return
+
+    new_coins = user['coins'] + BONUS_COINS
+    user['streak'] += 1
+    streak_bonus = STREAK_BONUS_COINS * user['streak']
+
+    update_user_data(user_id, {
+        'coins': new_coins + streak_bonus,
+        'last_bonus': current_time,
+        'streak': user['streak']
+    })
+
+    level_up, xp_to_next_level = handle_level_up(user_id, XP_PER_CORRECT_GUESS)
+
+    response = (f"🎁 You have claimed your daily bonus of {BONUS_COINS} coins! 🎉\n"
+                f"🔥 Streak Bonus: {streak_bonus} coins for a {user['streak']}-day streak!\n"
+                f"🌟 You earned {XP_PER_BONUS_CLAIM} XP.")
+    if level_up:
+        response += f"\n🏆 Congratulations! You've leveled up to Level {level_up}!"
+    else:
+        response += f"\n📈 XP to next level: {xp_to_next_level}"
+
+    bot.reply_to(message, response)
+
+@bot.message_handler(commands=['leaderboard'])
+def show_leaderboard(message):
+    top_users = users_collection.find().sort('coins', -1).limit(TOP_LEADERBOARD_LIMIT)
+    leaderboard_message = "<b>🏆 Leaderboard</b>\n\n"
+    for i, user in enumerate(top_users, start=1):
+        level, _ = calculate_level_and_xp(user['xp'])
+        leaderboard_message += (
+            f"{i}. {user['profile'] or 'User'}\n"
+            f"   💰 Coins: {user['coins']} | 💠 Level: {level}\n"
+        )
+    bot.send_message(message.chat.id, leaderboard_message, parse_mode='HTML')
+
+@bot.message_handler(commands=['upload'])
+def upload_character(message):
+    if message.from_user.id not in SUDO_USERS:
+        bot.reply_to(message, "🚫 You don't have permission to use this command.")
+        return
+
+    try:
+        command_args = message.text.split(maxsplit=2)
+        if len(command_args) < 3:
+            bot.reply_to(message, "⚠️ Usage: /upload <img_url> <character_name>")
+            return
+
+        img_url = command_args[1]
+        character_name = command_args[2]
+        rarity = assign_rarity()
+
+        new_character = {
+            'image_url': img_url,
+            'character_name': character_name,
+            'rarity': rarity
+        }
+        characters_collection.insert_one(new_character)
+
+        bot.reply_to(message, f"✅ Character '{character_name}' with rarity '{RARITY_DICT[rarity]} {rarity}' uploaded successfully!")
+    except Exception as e:
+        bot.reply_to(message, "⚠️ An error occurred while uploading the character.")
+
+@bot.message_handler(commands=['delete'])
+def delete_character(message):
+    if message.from_user.id not in SUDO_USERS:
+        bot.reply_to(message, "🚫 You don't have permission to use this command.")
+        return
+
+    try:
+        command_args = message.text.split(maxsplit=1)
+        if len(command_args) < 2:
+            bot.reply_to(message, "⚠️ Usage: /delete <id>")
+            return
+
+        character_id = int(command_args[1])
+        result = characters_collection.delete_one({'id': character_id})
+
+        if result.deleted_count > 0:
+            bot.reply_to(message, f"✅ Character with ID {character_id} has been deleted successfully.")
+        else:
+            bot.reply_to(message, f"⚠️ Character with ID {character_id} was not found.")
+    except Exception as e:
+        bot.reply_to(message, "⚠️ An error occurred while deleting the character.")
+
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     global global_message_count
@@ -159,38 +272,30 @@ def handle_all_messages(message):
     user_id = message.from_user.id
     user_guess = message.text.strip().lower() if message.text else ""
 
-    # Increment message count if in a group or supergroup
     if message.chat.type in ['group', 'supergroup']:
         global_message_count += 1
 
-    # Send a shuffled character if message threshold is met
     if global_message_count >= MESSAGE_THRESHOLD:
         send_character(chat_id)
         global_message_count = 0
 
-    # Check for correct guess if there's a current character to guess
     if current_character and user_guess:
         character_name = current_character['character_name'].strip().lower()
-
         if user_guess in character_name:
-            # Correct guess detected
             user = get_user_data(user_id)
             new_coins = user['coins'] + COINS_PER_GUESS
             user['correct_guesses'] += 1
             user['streak'] += 1
             streak_bonus = STREAK_BONUS_COINS * user['streak']
-
-            # Update user data with new coins, streak, and correct guesses
+            
             update_user_data(user_id, {
                 'coins': new_coins + streak_bonus,
                 'correct_guesses': user['correct_guesses'],
                 'streak': user['streak']
             })
 
-            # Handle XP and potential level-up
             level_up, xp_to_next_level = handle_level_up(user_id, XP_PER_CORRECT_GUESS)
 
-            # Send congratulatory message
             response = (f"🎉 Congratulations! You guessed correctly and earned {COINS_PER_GUESS} coins!\n"
                         f"🔥 Streak Bonus: {streak_bonus} coins for a {user['streak']}-guess streak!\n"
                         f"🌟 You earned {XP_PER_CORRECT_GUESS} XP.")
@@ -200,10 +305,7 @@ def handle_all_messages(message):
                 response += f"\n📈 XP to next level: {xp_to_next_level}"
 
             bot.reply_to(message, response)
-
-            # Send a new character after a correct guess
             send_character(chat_id)
-            current_character = None  # Reset current character after a correct guess
+            current_character = None
 
-# Start polling
 bot.infinity_polling(timeout=60, long_polling_timeout=60)
