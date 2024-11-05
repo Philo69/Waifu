@@ -99,6 +99,106 @@ def handle_level_up(user_id, xp_gained):
 
     if level_after > level_before:
         return level_after, xp_to_next_level  # Level-up occurred
+from dotenv import load_dotenv
+import os
+import telebot
+import random
+from pymongo import MongoClient, errors
+from datetime import datetime, timedelta
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Access environment variables
+API_TOKEN = os.getenv("API_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
+BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID"))
+CHARACTER_CHANNEL_ID = int(os.getenv("CHARACTER_CHANNEL_ID"))
+
+# Game Settings
+BONUS_COINS = int(os.getenv("BONUS_COINS"))
+STREAK_BONUS_COINS = int(os.getenv("STREAK_BONUS_COINS"))
+BONUS_INTERVAL = timedelta(days=int(os.getenv("BONUS_INTERVAL_DAYS")))
+
+COINS_PER_GUESS = int(os.getenv("COINS_PER_GUESS"))
+MESSAGE_THRESHOLD = int(os.getenv("MESSAGE_THRESHOLD"))
+TOP_LEADERBOARD_LIMIT = int(os.getenv("TOP_LEADERBOARD_LIMIT"))
+
+# Character Rarity Settings
+RARITY_LEVELS = os.getenv("RARITY_LEVELS").split(',')
+RARITY_EMOJIS = os.getenv("RARITY_EMOJIS").split(',')
+RARITY_WEIGHTS = list(map(int, os.getenv("RARITY_WEIGHTS").split(',')))
+RARITY_DICT = dict(zip(RARITY_LEVELS, RARITY_EMOJIS))
+
+# MongoDB Connection
+try:
+    client = MongoClient(MONGO_URI)
+    db = client['philo_grabber']  # Database name
+    users_collection = db['users']  # Collection for user data
+    characters_collection = db['characters']  # Collection for character data
+    groups_collection = db['groups']  # Collection for group stats
+    print("✅ Connected to MongoDB")
+except errors.ServerSelectionTimeoutError as err:
+    print(f"Error: Could not connect to MongoDB: {err}")
+    exit()
+
+SUDO_USERS = [BOT_OWNER_ID]  # List of sudo users, starting with the bot owner
+
+bot = telebot.TeleBot(API_TOKEN)
+
+# Global variables to track the current character and message count
+current_character = None
+global_message_count = 0
+
+def get_user_data(user_id):
+    try:
+        user = users_collection.find_one({'user_id': user_id})
+        if user is None:
+            new_user = {
+                'user_id': user_id,
+                'coins': 0,
+                'correct_guesses': 0,
+                'xp': 0,
+                'last_bonus': None,
+                'streak': 0,
+                'profile': None
+            }
+            users_collection.insert_one(new_user)
+            return new_user
+        return user
+    except Exception as e:
+        print(f"Error fetching user data: {e}")
+        return None
+
+def update_user_data(user_id, update_data):
+    try:
+        users_collection.update_one({'user_id': user_id}, {'$set': update_data})
+    except Exception as e:
+        print(f"Error updating user data: {e}")
+
+def calculate_level_and_xp(user_xp):
+    level = 1
+    xp_threshold = 500
+    increment = 150
+    while user_xp >= xp_threshold:
+        user_xp -= xp_threshold
+        level += 1
+        xp_threshold += increment
+    return level, xp_threshold - user_xp
+
+def handle_level_up(user_id, xp_gained):
+    user = get_user_data(user_id)
+    if user is None:
+        return None, None
+
+    new_xp = user['xp'] + xp_gained
+    level_before, _ = calculate_level_and_xp(user['xp'])
+    level_after, xp_to_next_level = calculate_level_and_xp(new_xp)
+
+    update_user_data(user_id, {'xp': new_xp})
+
+    if level_after > level_before:
+        return level_after, xp_to_next_level  # Level-up occurred
     else:
         return None, xp_to_next_level
 
@@ -212,11 +312,11 @@ def claim_bonus(message):
         'streak': user['streak']
     })
 
-    level_up, xp_to_next_level = handle_level_up(user_id, XP_PER_BONUS_CLAIM)
+    level_up, xp_to_next_level = handle_level_up(user_id, BONUS_COINS)
 
     response = (f"🎁 You have claimed your daily bonus of {BONUS_COINS} coins! 🎉\n"
                 f"🔥 Streak Bonus: {streak_bonus} coins for a {user['streak']}-day streak!\n"
-                f"🌟 You earned {XP_PER_BONUS_CLAIM} XP.")
+                f"🌟 You earned {BONUS_COINS} XP.")
     if level_up:
         response += f"\n🏆 Congratulations! You've leveled up to Level {level_up}!"
     else:
@@ -260,6 +360,55 @@ def show_stats(message):
     except Exception as e:
         bot.reply_to(message, "Error fetching stats.")
 
+@bot.message_handler(commands=['upload'])
+def upload_character(message):
+    if message.from_user.id not in SUDO_USERS:
+        bot.reply_to(message, "🚫 You don't have permission to use this command.")
+        return
+
+    try:
+        command_args = message.text.split(maxsplit=2)
+        if len(command_args) < 3:
+            bot.reply_to(message, "⚠️ Usage: /upload <img_url> <character_name>")
+            return
+
+        img_url = command_args[1]
+        character_name = command_args[2]
+        rarity = assign_rarity()
+
+        new_character = {
+            'image_url': img_url,
+            'character_name': character_name,
+            'rarity': rarity
+        }
+        characters_collection.insert_one(new_character)
+
+        bot.reply_to(message, f"✅ Character '{character_name}' with rarity '{RARITY_DICT[rarity]} {rarity}' uploaded successfully!")
+    except Exception as e:
+        bot.reply_to(message, "⚠️ An error occurred while uploading the character.")
+
+@bot.message_handler(commands=['delete'])
+def delete_character(message):
+    if message.from_user.id not in SUDO_USERS:
+        bot.reply_to(message, "🚫 You don't have permission to use this command.")
+        return
+
+    try:
+        command_args = message.text.split(maxsplit=1)
+        if len(command_args) < 2:
+            bot.reply_to(message, "⚠️ Usage: /delete <id>")
+            return
+
+        character_id = int(command_args[1])
+        result = characters_collection.delete_one({'id': character_id})
+
+        if result.deleted_count > 0:
+            bot.reply_to(message, f"✅ Character with ID {character_id} has been deleted successfully.")
+        else:
+            bot.reply_to(message, f"⚠️ Character with ID {character_id} was not found.")
+    except Exception as e:
+        bot.reply_to(message, "⚠️ An error occurred while deleting the character.")
+
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     global global_message_count
@@ -276,8 +425,10 @@ def handle_all_messages(message):
         global_message_count = 0
 
     if current_character and user_guess:
-        character_name = current_character['character_name'].strip().lower()
-        if user_guess in character_name:
+        character_words = set(current_character['character_name'].strip().lower().split())
+        guess_words = set(user_guess.split())
+
+        if character_words & guess_words:
             user = get_user_data(user_id)
             if user is None:
                 bot.reply_to(message, "Error fetching user data.")
@@ -294,17 +445,18 @@ def handle_all_messages(message):
                 'streak': user['streak']
             })
 
-            level_up, xp_to_next_level = handle_level_up(user_id, XP_PER_CORRECT_GUESS)
+            level_up, xp_to_next_level = handle_level_up(user_id, COINS_PER_GUESS)
 
             response = (f"🎉 Congratulations! You guessed correctly and earned {COINS_PER_GUESS} coins!\n"
                         f"🔥 Streak Bonus: {streak_bonus} coins for a {user['streak']}-guess streak!\n"
-                        f"🌟 You earned {XP_PER_CORRECT_GUESS} XP.")
+                        f"🌟 You earned {COINS_PER_GUESS} XP.")
             if level_up:
                 response += f"\n🏆 Congratulations! You've leveled up to Level {level_up}!"
             else:
                 response += f"\n📈 XP to next level: {xp_to_next_level}"
 
             bot.reply_to(message, response)
+            
             send_character(chat_id)
             current_character = None
 
