@@ -125,6 +125,10 @@ class AnimeGuessingGame:
 # Initialize the game
 game = AnimeGuessingGame()
 
+# Define a helper function to create a custom filter for owner or sudo users
+def is_owner_or_sudo(user_id):
+    return user_id == config.BOT_OWNER_ID or user_id in game.sudo_users
+
 # Define Bot Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🎉 Welcome to Philo Waifu! 🎉 Start guessing the character name. Type /help for commands.")
@@ -170,22 +174,28 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.message.from_user.id
-    if len(context.args) < 1:
-        await update.message.reply_text("Usage: /upload <character_name>")
-        return
-    character_name = " ".join(context.args)
-    response = game.upload_character(character_name, user_id)
-    await update.message.reply_text(response)
+    if is_owner_or_sudo(user_id):
+        if len(context.args) < 1:
+            await update.message.reply_text("Usage: /upload <character_name>")
+            return
+        character_name = " ".join(context.args)
+        response = game.upload_character(character_name, user_id)
+        await update.message.reply_text(response)
+    else:
+        await update.message.reply_text("❌ You do not have permission to use this command.")
 
 async def add_sudo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current_user_id = update.message.from_user.id
-    try:
-        new_sudo_id = int(context.args[0])
-        response = game.add_sudo_user(new_sudo_id, current_user_id)
-        await update.message.reply_text(response)
-    except (IndexError, ValueError) as e:
-        logger.error("Error processing addsudo command", exc_info=True)
-        await update.message.reply_text("Usage: /addsudo <user_id>")
+    if current_user_id == config.BOT_OWNER_ID:
+        try:
+            new_sudo_id = int(context.args[0])
+            response = game.add_sudo_user(new_sudo_id, current_user_id)
+            await update.message.reply_text(response)
+        except (IndexError, ValueError) as e:
+            logger.error("Error processing addsudo command", exc_info=True)
+            await update.message.reply_text("Usage: /addsudo <user_id>")
+    else:
+        await update.message.reply_text("❌ Only the bot owner can add sudo users.")
 
 async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.message.from_user.id
@@ -214,17 +224,17 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("profile", profile))
     application.add_handler(CommandHandler("leaderboard", leaderboard))
-    application.add_handler(CommandHandler("upload", upload, filters=filters.User(config.BOT_OWNER_ID) | filters.User(lambda user_id: user_id in game.sudo_users)))
-    application.add_handler(CommandHandler("addsudo", add_sudo, filters=filters.User(config.BOT_OWNER_ID)))
+    application.add_handler(CommandHandler("upload", upload))
+    application.add_handler(CommandHandler("addsudo", add_sudo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_guess))
 
-    # Run polling in an infinite loop with error handling
+    # Infinite polling with error handling
     while True:
         try:
             application.run_polling()
         except Exception as e:
             logger.error("Error in polling. Restarting...", exc_info=True)
-            time.sleep(5)  # Wait a few seconds before retrying
+            time.sleep(5)  # Pause before retrying
 
 if __name__ == "__main__":
     main()
