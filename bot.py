@@ -4,11 +4,11 @@ from pymongo import MongoClient, errors
 from datetime import datetime, timedelta
 
 # Bot API token and MongoDB connection URI
-API_TOKEN = "6862816736:AAEw1yc3ME8g4PjCOid2wSov5H71vM0n-H8"
+API_TOKEN = "6862816736:AAGAAsqsz7MzO6uSMfIbkjt1NScwtC6mITU"
 MONGO_URI = "mongodb+srv://PhiloWise:Philo@waifu.yl9tohm.mongodb.net/?retryWrites=true&w=majority&appName=Waifu"
 
 # Bot Owner and Channel IDs
-BOT_OWNER_ID = 7222795580
+BOT_OWNER_ID = 7222795580  # Specified owner ID
 CHARACTER_CHANNEL_ID = -1002438449944
 
 # Game Settings
@@ -154,15 +154,15 @@ def show_help(message):
     help_message = """
 <b>🌸 Philo Waifu Bot Commands 🌸</b>
 
-🎉 <b>General Commands:</b>
+<b>General Commands:</b>
 /start - Start the bot and get a welcome message.
-/help - Show this help message.
+/help - Show this help message listing all available commands.
 /bonus - Claim your daily bonus coins and XP.
 /profile - View your profile, including your level, XP, and coins.
 /leaderboard - Show the top 10 users with their levels and coins.
 /stats - View bot statistics (Owner only).
 
-🔧 <b>Sudo Commands:</b> (For bot owners and sudo users)
+<b>Sudo Commands:</b> (For bot owners and sudo users)
 /upload <img_url> <character_name> - Add a new character with an image URL and character name.
 /delete <id> - Delete a character by its ID.
 /addsudo <user_id> - Add a new sudo user (Owner only).
@@ -286,6 +286,33 @@ def add_sudo_user(message):
         bot.reply_to(message, "⚠️ Invalid user ID format.")
     except Exception as e:
         bot.reply_to(message, "⚠️ An error occurred while adding sudo user.")
+
+@bot.message_handler(commands=['upload'])
+def upload_character(message):
+    if message.from_user.id not in SUDO_USERS:
+        bot.reply_to(message, "🚫 You don't have permission to use this command.")
+        return
+
+    try:
+        command_args = message.text.split(maxsplit=2)
+        if len(command_args) < 3:
+            bot.reply_to(message, "⚠️ Usage: /upload <img_url> <character_name>")
+            return
+
+        img_url = command_args[1]
+        character_name = command_args[2]
+        rarity = assign_rarity()
+
+        new_character = {
+            'image_url': img_url,
+            'character_name': character_name,
+            'rarity': rarity
+        }
+        characters_collection.insert_one(new_character)
+
+        bot.reply_to(message, f"✅ Character '{character_name}' with rarity '{RARITY_DICT[rarity]} {rarity}' uploaded successfully!")
+    except Exception as e:
+        bot.reply_to(message, "⚠️ An error occurred while uploading the character.")
 
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
