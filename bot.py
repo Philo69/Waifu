@@ -1,20 +1,17 @@
-from dotenv import load_dotenv
-import os
 import telebot
 import random
 from pymongo import MongoClient, errors
 from datetime import datetime, timedelta
 
-# Load environment variables from .env file
-load_dotenv()
+# Bot API token and MongoDB connection URI
+API_TOKEN = "6862816736:AAEw1yc3ME8g4PjCOid2wSov5H71vM0n-H8"
+MONGO_URI = "mongodb+srv://PhiloWise:Philo@waifu.yl9tohm.mongodb.net/?retryWrites=true&w=majority&appName=Waifu"
 
-# Critical environment variables
-API_TOKEN = os.getenv("API_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID"))
-CHARACTER_CHANNEL_ID = int(os.getenv("CHARACTER_CHANNEL_ID"))
+# Bot Owner and Channel IDs
+BOT_OWNER_ID = 7222795580
+CHARACTER_CHANNEL_ID = -1002438449944
 
-# Game Settings (constants defined directly in the script)
+# Game Settings
 BONUS_COINS = 50000               # Daily bonus coins for /bonus command
 STREAK_BONUS_COINS = 1000         # Additional coins for maintaining a streak
 BONUS_INTERVAL = timedelta(days=1) # Time interval for claiming daily bonus
@@ -104,11 +101,16 @@ def handle_level_up(user_id, xp_gained):
 def assign_rarity():
     return random.choices(RARITY_LEVELS, weights=RARITY_WEIGHTS, k=1)[0]
 
-def send_character(chat_id):
-    global current_character
+def fetch_random_character():
     characters = list(characters_collection.find())
     if characters:
-        current_character = random.choice(characters)
+        return random.choice(characters)
+    return None
+
+def send_character(chat_id):
+    global current_character
+    current_character = fetch_random_character()
+    if current_character:
         rarity = RARITY_DICT[current_character['rarity']]
         caption = (
             f"🎨 Guess the Anime Character!\n\n"
@@ -138,12 +140,12 @@ def send_welcome(message):
     welcome_message = """
 <b>🌸 Welcome to Philo Waifu 🌸</b>
 
-🎉 Dive into the exciting world of anime characters! Here's what you can do:
-- 🏆 Guess anime characters and earn coins, XP, and increase your streak!
-- 💰 Earn daily bonuses, level up, and climb the leaderboard.
-- 🤔 Simply type your guess - if any word matches a character's name, you’ll score!
+🎉 Get ready to dive into the world of anime characters! With Philo Waifu, you can:
+- 🏆 Guess anime characters to earn coins, gain XP, and level up.
+- 💰 Collect daily bonuses and climb the leaderboard.
+- 🤔 Simply type your guess; if any word matches a character's name, you score!
 
-Use /help to see all commands and get started on your adventure. Enjoy!
+Use /help to see all available commands. Let's start your anime adventure!
 """
     bot.send_message(message.chat.id, welcome_message, parse_mode='HTML')
 
@@ -163,6 +165,7 @@ def show_help(message):
 🔧 <b>Sudo Commands:</b> (For bot owners and sudo users)
 /upload <img_url> <character_name> - Add a new character with an image URL and character name.
 /delete <id> - Delete a character by its ID.
+/addsudo <user_id> - Add a new sudo user (Owner only).
 /changetime <interval> - Change the message threshold for character appearance.
 """
     bot.send_message(message.chat.id, help_message, parse_mode='HTML')
@@ -261,54 +264,28 @@ def show_stats(message):
     except Exception as e:
         bot.reply_to(message, "Error fetching stats.")
 
-@bot.message_handler(commands=['upload'])
-def upload_character(message):
-    if message.from_user.id not in SUDO_USERS:
-        bot.reply_to(message, "🚫 You don't have permission to use this command.")
-        return
-
-    try:
-        command_args = message.text.split(maxsplit=2)
-        if len(command_args) < 3:
-            bot.reply_to(message, "⚠️ Usage: /upload <img_url> <character_name>")
-            return
-
-        img_url = command_args[1]
-        character_name = command_args[2]
-        rarity = assign_rarity()
-
-        new_character = {
-            'image_url': img_url,
-            'character_name': character_name,
-            'rarity': rarity
-        }
-        characters_collection.insert_one(new_character)
-
-        bot.reply_to(message, f"✅ Character '{character_name}' with rarity '{RARITY_DICT[rarity]} {rarity}' uploaded successfully!")
-    except Exception as e:
-        bot.reply_to(message, "⚠️ An error occurred while uploading the character.")
-
-@bot.message_handler(commands=['delete'])
-def delete_character(message):
-    if message.from_user.id not in SUDO_USERS:
+@bot.message_handler(commands=['addsudo'])
+def add_sudo_user(message):
+    if message.from_user.id != BOT_OWNER_ID:
         bot.reply_to(message, "🚫 You don't have permission to use this command.")
         return
 
     try:
         command_args = message.text.split(maxsplit=1)
         if len(command_args) < 2:
-            bot.reply_to(message, "⚠️ Usage: /delete <id>")
+            bot.reply_to(message, "⚠️ Usage: /addsudo <user_id>")
             return
 
-        character_id = int(command_args[1])
-        result = characters_collection.delete_one({'id': character_id})
-
-        if result.deleted_count > 0:
-            bot.reply_to(message, f"✅ Character with ID {character_id} has been deleted successfully.")
+        new_sudo_user_id = int(command_args[1])
+        if new_sudo_user_id not in SUDO_USERS:
+            SUDO_USERS.append(new_sudo_user_id)
+            bot.reply_to(message, f"✅ User {new_sudo_user_id} has been added as a sudo user.")
         else:
-            bot.reply_to(message, f"⚠️ Character with ID {character_id} was not found.")
+            bot.reply_to(message, "⚠️ User is already a sudo user.")
+    except ValueError:
+        bot.reply_to(message, "⚠️ Invalid user ID format.")
     except Exception as e:
-        bot.reply_to(message, "⚠️ An error occurred while deleting the character.")
+        bot.reply_to(message, "⚠️ An error occurred while adding sudo user.")
 
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
