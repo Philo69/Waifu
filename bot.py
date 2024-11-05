@@ -23,7 +23,7 @@ except errors.ServerSelectionTimeoutError as err:
     print(f"Error: Could not connect to MongoDB: {err}")
     exit()
 
-SUDO_USERS = [BOT_OWNER_ID, 6180999156]
+SUDO_USERS = [7222795580, 6180999156]
 
 bot = telebot.TeleBot(API_TOKEN)
 
