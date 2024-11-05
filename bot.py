@@ -218,7 +218,13 @@ def main():
     application.add_handler(CommandHandler("addsudo", add_sudo, filters=filters.User(config.BOT_OWNER_ID)))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_guess))
 
-    application.run_polling()
+    # Run polling in an infinite loop with error handling
+    while True:
+        try:
+            application.run_polling()
+        except Exception as e:
+            logger.error("Error in polling. Restarting...", exc_info=True)
+            time.sleep(5)  # Wait a few seconds before retrying
 
 if __name__ == "__main__":
     main()
