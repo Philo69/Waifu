@@ -1,15 +1,33 @@
+from dotenv import load_dotenv
 import os
 import telebot
 import random
 from pymongo import MongoClient, errors
 from datetime import datetime, timedelta
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Load environment variables for sensitive information
+# Load environment variables from .env file
+load_dotenv()
+
+# Access environment variables
 API_TOKEN = os.getenv("API_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID"))
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+CHARACTER_CHANNEL_ID = int(os.getenv("CHARACTER_CHANNEL_ID"))
+
+# Game Settings
+BONUS_COINS = int(os.getenv("BONUS_COINS"))
+STREAK_BONUS_COINS = int(os.getenv("STREAK_BONUS_COINS"))
+BONUS_INTERVAL = timedelta(days=int(os.getenv("BONUS_INTERVAL_DAYS")))
+
+COINS_PER_GUESS = int(os.getenv("COINS_PER_GUESS"))
+MESSAGE_THRESHOLD = int(os.getenv("MESSAGE_THRESHOLD"))
+TOP_LEADERBOARD_LIMIT = int(os.getenv("TOP_LEADERBOARD_LIMIT"))
+
+# Character Rarity Settings
+RARITY_LEVELS = os.getenv("RARITY_LEVELS").split(',')
+RARITY_EMOJIS = os.getenv("RARITY_EMOJIS").split(',')
+RARITY_WEIGHTS = list(map(int, os.getenv("RARITY_WEIGHTS").split(',')))
+RARITY_DICT = dict(zip(RARITY_LEVELS, RARITY_EMOJIS))
 
 # MongoDB Connection
 try:
@@ -23,49 +41,9 @@ except errors.ServerSelectionTimeoutError as err:
     print(f"Error: Could not connect to MongoDB: {err}")
     exit()
 
-SUDO_USERS = [7222795580, 6180999156]
+SUDO_USERS = [BOT_OWNER_ID]  # List of sudo users, starting with the bot owner
 
 bot = telebot.TeleBot(API_TOKEN)
-
-BONUS_COINS = 50000
-BONUS_INTERVAL = timedelta(days=1)
-COINS_PER_GUESS = 50
-STREAK_BONUS_COINS = 1000
-
-# Updated Rarity Levels with New Categories and Emojis
-RARITY_LEVELS = {
-    'Bronze': '🥉',
-    'Silver': '🥈',
-    'Gold': '🥇',
-    'Platinum': '💿',
-    'Diamond': '💎'
-}
-RARITY_WEIGHTS = [60, 25, 10, 4, 1]  # Adjusted weights for new rarities
-MESSAGE_THRESHOLD = 5  # Default number of messages before sending a new character
-TOP_LEADERBOARD_LIMIT = 10
-
-# Level-Up System Configuration
-XP_PER_CORRECT_GUESS = 100
-XP_PER_BONUS_CLAIM = 50
-LEVEL_UP_XP_BASE = 500
-LEVEL_UP_XP_INCREMENT = 150
-
-def is_sudo(user_id):
-    return user_id in SUDO_USERS
-
-# Helper function for calculating level and XP threshold
-def calculate_level_and_xp(user_xp):
-    level = 1
-    xp_threshold = LEVEL_UP_XP_BASE
-    while user_xp >= xp_threshold:
-        user_xp -= xp_threshold
-        level += 1
-        xp_threshold += LEVEL_UP_XP_INCREMENT
-    return level, xp_threshold - user_xp
-
-# Function to assign rarity based on defined weights
-def assign_rarity():
-    return random.choices(list(RARITY_LEVELS.keys()), weights=RARITY_WEIGHTS, k=1)[0]
 
 # Global variables to track the current character and message count
 current_character = None
@@ -90,15 +68,17 @@ def get_user_data(user_id):
 def update_user_data(user_id, update_data):
     users_collection.update_one({'user_id': user_id}, {'$set': update_data})
 
-# Helper function to update character IDs sequentially
-def update_character_ids():
-    characters = list(characters_collection.find().sort("id"))
-    for index, character in enumerate(characters):
-        new_id = index + 1
-        if character["id"] != new_id:
-            characters_collection.update_one({"_id": character["_id"]}, {"$set": {"id": new_id}})
+# Helper function to calculate level and XP threshold
+def calculate_level_and_xp(user_xp):
+    level = 1
+    xp_threshold = 500
+    increment = 150
+    while user_xp >= xp_threshold:
+        user_xp -= xp_threshold
+        level += 1
+        xp_threshold += increment
+    return level, xp_threshold - user_xp
 
-# Function to handle XP and potential level-up
 def handle_level_up(user_id, xp_gained):
     user = get_user_data(user_id)
     new_xp = user['xp'] + xp_gained
@@ -108,17 +88,19 @@ def handle_level_up(user_id, xp_gained):
     update_user_data(user_id, {'xp': new_xp})
 
     if level_after > level_before:
-        return level_after, xp_to_next_level
+        return level_after, xp_to_next_level  # Level-up occurred
     else:
         return None, xp_to_next_level
 
-# Function to shuffle and send a random character
+def assign_rarity():
+    return random.choices(RARITY_LEVELS, weights=RARITY_WEIGHTS, k=1)[0]
+
 def send_character(chat_id):
     global current_character
     characters = list(characters_collection.find())
     if characters:
-        current_character = random.choice(characters)  # Shuffle and pick a random character
-        rarity = RARITY_LEVELS[current_character['rarity']]
+        current_character = random.choice(characters)
+        rarity = RARITY_DICT[current_character['rarity']]
         caption = (
             f"🎨 Guess the Anime Character!\n\n"
             f"💬 Name: ???\n"
@@ -132,7 +114,43 @@ def send_character(chat_id):
     else:
         bot.send_message(chat_id, "⚠️ No characters available to display.")
 
-# Message handler for character guessing and message counting
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    user_id = message.from_user.id
+    user = get_user_data(user_id)
+    if not user['profile']:
+        profile_name = message.from_user.full_name
+        update_user_data(user_id, {'profile': profile_name})
+
+    welcome_message = """
+<b>🌸 Welcome to Philo Waifu 🌸</b>
+
+🎉 Dive into the world of anime characters!
+Use commands to start collecting and guessing.
+
+✨ Let's get started, good luck! ✨
+"""
+    bot.send_message(message.chat.id, welcome_message, parse_mode='HTML')
+
+@bot.message_handler(commands=['help'])
+def show_help(message):
+    help_message = """
+<b>🌸 Philo Waifu Bot Commands 🌸</b>
+
+🎉 <b>General Commands:</b>
+/start - Start the bot and get a welcome message.
+/help - Show this help message.
+/bonus - Claim your daily bonus coins and XP.
+/profile - View your profile, including your level, XP, and coins.
+/leaderboard - Show the top 10 users with their levels and coins.
+
+🔧 <b>Sudo Commands:</b> (For bot owners and sudo users)
+/upload <img_url> <character_name> - Add a new character with an image URL and character name.
+/delete <id> - Delete a character by its ID.
+/changetime <interval> - Change the message threshold for character appearance.
+"""
+    bot.send_message(message.chat.id, help_message, parse_mode='HTML')
+
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     global global_message_count
